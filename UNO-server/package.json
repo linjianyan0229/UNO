@@ -1,0 +1,29 @@
+{
+  "name": "uno-server",
+  "version": "1.0.0",
+  "description": "",
+  "author": "",
+  "license": "ISC",
+  "keywords": [],
+  "main": "index.js",
+  "packageManager": "pnpm@11.14.0",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc && nodemon ./dist/index.js -w",
+    "lint": "eslint .",
+    "docker-deploy": "pnpm build && forever start -l forever.log -o out.log -e err.log ./dist/index.js"
+  },
+  "dependencies": {
+    "mysql2": "^3.23.0",
+    "ws": "^8.21.1"
+  },
+  "devDependencies": {
+    "@antfu/eslint-config": "^9.1.0",
+    "@types/node": "^26.1.1",
+    "@types/ws": "^8.18.1",
+    "eslint": "^10.7.0",
+    "nodemon": "^3.1.14",
+    "tslib": "^2.8.1",
+    "typescript": "^5.9.3"
+  }
+}
