@@ -23,6 +23,8 @@ export const useRoomStore = defineStore('game', {
     endTime: (state) => state._roomInfo.endTime,
     winnerOrder: (state) => state._roomInfo.winnerOrder,
     lastCard: (state) => state._roomInfo.lastCard,
+    accumulation: (state) => state._roomInfo.accumulation || 0,
+    pendingAction: (state) => state._roomInfo.pendingAction || null,
     selectCards: (state) => state._selectCards
   },
   actions: {

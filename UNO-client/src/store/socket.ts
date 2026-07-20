@@ -1,10 +1,12 @@
 import { defineStore } from "pinia";
 import socket from "~/socket";
-import EventEmitter from "events";
 import type { ServerEvents } from '~/types/server';
 import { RoomInfo, RoomSummary } from "~/types/room";
+import { eventBus } from '~/socket/events';
 
-export const eventBus = new EventEmitter()
+export { eventBus }
+
+const REQUEST_TIMEOUT = 10_000
 
 const useSocketStore = defineStore('socket', {
   state: () => {
@@ -14,167 +16,146 @@ const useSocketStore = defineStore('socket', {
   },
   actions: {
     Promisify<T>(eventName: ServerEvents) {
-      return new Promise<T>((resolve) => {
-        eventBus.once(eventName, resolve)
+      return new Promise<T>((resolve, reject) => {
+        let timer: ReturnType<typeof setTimeout>
+        const cleanup = () => {
+          clearTimeout(timer)
+          eventBus.removeListener(eventName, onResponse)
+          eventBus.removeListener('SOCKET_DISCONNECTED', onDisconnect)
+        }
+        const onResponse = (data: T) => {
+          cleanup()
+          resolve(data)
+        }
+        const onDisconnect = () => {
+          cleanup()
+          reject(new Error('WebSocket disconnected'))
+        }
+        eventBus.once(eventName, onResponse)
+        eventBus.once('SOCKET_DISCONNECTED', onDisconnect)
+        timer = setTimeout(() => {
+          cleanup()
+          eventBus.emit('SOCKET_REQUEST_TIMEOUT')
+          reject(new Error(`WebSocket request timed out: ${eventName}`))
+        }, REQUEST_TIMEOUT)
       })
     },
     whenReady() {
       if (this.socket.readyState === WebSocket.OPEN) return Promise.resolve()
-      return new Promise<void>((resolve) => {
-        this.socket.addEventListener('open', () => resolve(), { once: true })
+      if (this.socket.readyState !== WebSocket.CONNECTING) {
+        eventBus.emit('SOCKET_DISCONNECTED')
+        return Promise.reject(new Error('WebSocket is not connected'))
+      }
+      return new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          cleanup()
+          eventBus.emit('SOCKET_REQUEST_TIMEOUT')
+          reject(new Error('WebSocket connection timed out'))
+        }, REQUEST_TIMEOUT)
+        const cleanup = () => {
+          clearTimeout(timer)
+          this.socket.removeEventListener('open', onOpen)
+          this.socket.removeEventListener('close', onClose)
+        }
+        const onOpen = () => {
+          cleanup()
+          resolve()
+        }
+        const onClose = () => {
+          cleanup()
+          reject(new Error('WebSocket disconnected before opening'))
+        }
+        this.socket.addEventListener('open', onOpen, { once: true })
+        this.socket.addEventListener('close', onClose, { once: true })
       })
     },
-    async register(name: string, password: string) {
+    async request<T>(responseEvent: ServerEvents, type: string, data: unknown) {
       await this.whenReady()
-      this.socket.send(JSON.stringify({
-        type: 'REGISTER',
-        data: { name, password }
-      }))
-      return this.Promisify<UserProfile | null>('RES_REGISTER')
+      const response = this.Promisify<T>(responseEvent)
+      try {
+        this.socket.send(JSON.stringify({ type, data }))
+      } catch (error) {
+        eventBus.emit('SOCKET_DISCONNECTED')
+        throw error
+      }
+      return response
+    },
+    sendEvent(type: string, data: unknown) {
+      if (this.socket.readyState !== WebSocket.OPEN) {
+        eventBus.emit('SOCKET_DISCONNECTED')
+        return false
+      }
+      this.socket.send(JSON.stringify({ type, data }))
+      return true
+    },
+    async register(name: string, password: string) {
+      return this.request<UserProfile | null>('RES_REGISTER', 'REGISTER', { name, password })
     },
     async login(name: string, password: string) {
-      await this.whenReady()
-      this.socket.send(JSON.stringify({
-        type: 'LOGIN',
-        data: { name, password }
-      }))
-      return this.Promisify<UserProfile | null>('RES_LOGIN')
+      return this.request<UserProfile | null>('RES_LOGIN', 'LOGIN', { name, password })
     },
     async autoLogin(token: string) {
-      await this.whenReady()
-      this.socket.send(JSON.stringify({
-        type: 'AUTO_LOGIN',
-        data: { token }
-      }))
-      return this.Promisify<UserProfile | null>('RES_AUTO_LOGIN')
+      return this.request<UserProfile | null>('RES_AUTO_LOGIN', 'AUTO_LOGIN', { token })
     },
     async updateProfile(token: string, payload: { name?: string, avatar?: string }) {
-      await this.whenReady()
-      this.socket.send(JSON.stringify({
-        type: 'UPDATE_PROFILE',
-        data: { token, ...payload }
-      }))
-      return this.Promisify<UserProfile | null>('RES_UPDATE_PROFILE')
+      return this.request<UserProfile | null>('RES_UPDATE_PROFILE', 'UPDATE_PROFILE', { token, ...payload })
     },
     createRoom(name: string, owner: UserInfo) {
-      this.socket.send(JSON.stringify({
-        type: 'CREATE_ROOM',
-        data: {
-          roomId: Date.now().toString(),
-          roomName: name,
-          owner
-        }
-      }))
-      return this.Promisify<RoomInfo>('RES_CREATE_ROOM')
+      return this.request<RoomInfo>('RES_CREATE_ROOM', 'CREATE_ROOM', {
+        roomId: Date.now().toString(),
+        roomName: name,
+        owner
+      })
     },
     joinRoom(code: string, userInfo: UserInfo) {
-      this.socket.send(JSON.stringify({
-        type: 'JOIN_ROOM',
-        data: {
-          roomCode: code,
-          userInfo
-        }
-      }))
-      return this.Promisify<RoomInfo>('RES_JOIN_ROOM')
+      return this.request<RoomInfo>('RES_JOIN_ROOM', 'JOIN_ROOM', { roomCode: code, userInfo })
     },
     listRooms(query = '') {
-      this.socket.send(JSON.stringify({
-        type: 'LIST_ROOMS',
-        data: { query }
-      }))
-      return this.Promisify<RoomSummary[]>('RES_ROOM_LIST')
+      return this.request<RoomSummary[]>('RES_ROOM_LIST', 'LIST_ROOMS', { query })
     },
     startGame(code: string) {
-      this.socket.send(JSON.stringify({
-        type: 'START_GAME',
-        data: code
-      }))
-      return this.Promisify<null>('RES_START_GAME')
+      return this.request<null>('RES_START_GAME', 'START_GAME', code)
     },
     startAIGame(userInfo: UserInfo, difficulty: AIDifficulty) {
-      this.socket.send(JSON.stringify({
-        type: 'START_AI_GAME',
-        data: { userInfo, difficulty }
-      }))
-      return this.Promisify<{ roomInfo: RoomInfo, userCards: CardInfo[] }>('RES_START_AI_GAME')
+      return this.request<{ roomInfo: RoomInfo, userCards: CardInfo[] }>(
+        'RES_START_AI_GAME',
+        'START_AI_GAME',
+        { userInfo, difficulty }
+      )
     },
     dissolveGame(code: string) {
-      this.socket.send(JSON.stringify({
-        type: 'DISSOLVE_ROOM',
-        data: code
-      }))
+      this.sendEvent('DISSOLVE_ROOM', code)
     },
     toggleReady(code: string, ready: boolean) {
-      this.socket.send(JSON.stringify({
-        type: 'READY',
-        data: {
-          roomCode: code,
-          ready,
-        }
-      }))
+      this.sendEvent('READY', { roomCode: code, ready })
     },
     leaveGame(code: string, userInfo: UserInfo) {
-      this.socket.send(JSON.stringify({
-        type: 'LEAVE_ROOM',
-        data: {
-          roomCode: code,
-          userInfo,
-        }
-      }))
-      return this.Promisify<null>('RES_LEAVE_ROOM')
+      return this.request<null>('RES_LEAVE_ROOM', 'LEAVE_ROOM', { roomCode: code, userInfo })
     },
     outOfCard(cardsIndex: number[], roomCode: string) {
-      this.socket.send(JSON.stringify({
-        type: 'OUT_OF_THE_CARD',
-        data: {
-          cardsIndex,
-          roomCode,
-        }
-      }))
-      return this.Promisify<CardInfo[] | null>('RES_OUT_OF_THE_CARD')
+      return this.request<CardInfo[] | null>('RES_OUT_OF_THE_CARD', 'OUT_OF_THE_CARD', { cardsIndex, roomCode })
     },
     getOneCard(roomCode: string) {
-      this.socket.send(JSON.stringify({
-        type: 'GET_ONE_CARD',
-        data: roomCode
-      }))
-      return this.Promisify<{
+      return this.request<{
         card: CardInfo,
-        userCards: CardInfo[]
-      }>('RES_GET_ONE_CARD')
+        userCards: CardInfo[],
+        penaltyResolved?: boolean
+      }>('RES_GET_ONE_CARD', 'GET_ONE_CARD', roomCode)
     },
     toNextTurn(roomCode: string) {
-      this.socket.send(JSON.stringify({
-        type: 'NEXT_TURN',
-        data: roomCode
-      }))
+      this.sendEvent('NEXT_TURN', roomCode)
     },
     submitColor(color: CardColor, roomCode: string) {
-      this.socket.send(JSON.stringify({
-        type: 'SUBMIT_COLOR',
-        data: {
-          color,
-          roomCode
-        }
-      }))
+      this.sendEvent('SUBMIT_COLOR', { color, roomCode })
     },
     submitTarget(targetId: string, roomCode: string) {
-      this.socket.send(JSON.stringify({
-        type: 'SELECT_TARGET',
-        data: { targetId, roomCode }
-      }))
+      this.sendEvent('SELECT_TARGET', { targetId, roomCode })
     },
     challengeAdd4(challenge: boolean, roomCode: string) {
-      this.socket.send(JSON.stringify({
-        type: 'CHALLENGE_ADD4',
-        data: { challenge, roomCode }
-      }))
+      this.sendEvent('CHALLENGE_ADD4', { challenge, roomCode })
     },
     uno(roomCode: string) {
-      this.socket.send(JSON.stringify({
-        type: 'UNO',
-        data: roomCode
-      }))
+      this.sendEvent('UNO', roomCode)
     }
   }
 })

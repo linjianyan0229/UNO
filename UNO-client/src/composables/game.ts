@@ -13,6 +13,13 @@ export const isInTurn = computed(() => {
 
 export function useCheckCard(target: CardInfo): boolean {
   const lastCard = roomStore.lastCard
+  const forced = roomStore.pendingAction
+  if (forced?.kind === 'FORCED_COLOR') {
+    return target.color === forced.color || (forced.allowPalette && target.type === 'palette')
+  }
+  if (roomStore.accumulation > 0) {
+    return target.color === lastCard?.color || target.type === 'exchange' || target.type === 'palette'
+  }
   if(!lastCard || isUniversalCard(target)) return true;
   return isSameColor(target,lastCard) || isSameType(target,lastCard);
 }

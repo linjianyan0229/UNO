@@ -16,8 +16,8 @@
     <div class="hand-actions">
       <button v-show="isInTurn" c-gray text="3.5" b="gray rounded-10 3 dashed hover:transparent"
         transition="duration-400" hover="bg-gray text-white" px-3 py-1 @click="handleDealCards">出牌</button>
-      <button v-show="isInTurn" c-gray text="3.5" b="gray rounded-10 3 dashed hover:transparent"
-        transition="duration-400" hover="bg-gray text-white" px-3 py-1 @click="handleGetCard">取牌</button>
+      <button v-show="isInTurn" :disabled="isDrawing" c-gray text="3.5" b="gray rounded-10 3 dashed hover:transparent"
+        transition="duration-400" hover="bg-gray text-white" px-3 py-1 @click="handleGetCard">{{ isDrawing ? '取牌中...' : drawPenalty ? `接受 +${drawPenalty}` : '取牌' }}</button>
       <button c-red-500 text="3.5" b="red-500 rounded-10 3 dashed hover:transparent" transition="duration-400"
         hover="bg-red-500 text-white" px-3 py-1 @click="handleUNO">UNO</button>
     </div>
@@ -35,6 +35,12 @@ const roomStore = useRoomStore();
 const cardArea = ref<HTMLElement>();
 const hoverIndex = ref(-1)
 const cardAreaWidth = ref(720)
+const isDrawing = ref(false)
+const drawPenalty = computed(() => {
+  if (roomStore.accumulation) return roomStore.accumulation
+  const pending = roomStore.pendingAction
+  return pending?.kind === 'FORCED_COLOR' ? pending.penalty : 0
+})
 // 双击判定:同一张牌在 300ms 内再次点击视为双击
 let lastClickIndex = -1
 let lastClickAt = 0
@@ -158,10 +164,13 @@ const handleDealCards = () => {
 }
 
 const handleGetCard = () => {
+  if (isDrawing.value) return
+  isDrawing.value = true
   socketStore.getOneCard(roomStore.roomCode).then((data) => {
     if (data) {
-      const { card, userCards } = data;
+      const { card, userCards, penaltyResolved } = data;
       roomStore.setUserCards(userCards);
+      if (penaltyResolved) return;
       if (useCheckCard(card)) {
         Dialog({
           title: '获得的牌符合规则',
@@ -184,6 +193,10 @@ const handleGetCard = () => {
         socketStore.toNextTurn(roomStore.roomCode)
       }
     }
+  }).catch(() => {
+    useNotify('取牌失败，连接已断开')
+  }).finally(() => {
+    isDrawing.value = false
   })
 }
 

@@ -43,7 +43,21 @@ declare type PendingAction =
   | {
       kind: 'TARGET'
       actorId: string
-      cardType: 'target' | 'bomb'
+      cardType: 'target'
+    }
+  | {
+      kind: 'TARGET_COLOR'
+      actorId: string
+      targetId: string
+    }
+  | {
+      kind: 'FORCED_COLOR'
+      source: 'target' | 'bomb'
+      actorId: string
+      targetId: string
+      color: CardColor
+      penalty: number
+      allowPalette: boolean
     }
 
 declare interface TargetPlayer {

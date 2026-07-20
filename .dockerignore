@@ -1,0 +1,6 @@
+.git
+.github
+.env.production
+**/node_modules
+**/dist
+**/*.log

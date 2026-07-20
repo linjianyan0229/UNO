@@ -11,6 +11,7 @@
     "build": "tsc",
     "dev": "tsc && nodemon ./dist/index.js -w",
     "lint": "eslint .",
+    "test": "tsc && node --test dist/services/game.test.js",
     "docker-deploy": "pnpm build && forever start -l forever.log -o out.log -e err.log ./dist/index.js"
   },
   "dependencies": {

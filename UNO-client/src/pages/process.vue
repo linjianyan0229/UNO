@@ -17,6 +17,7 @@
               :order="0"
             />
             <div v-else class="discard-placeholder">等待首张牌</div>
+            <span v-if="drawPenalty" class="draw-counter" aria-live="polite">+{{ drawPenalty }}</span>
           </div>
         </section>
         <CardArea w="100%" overflow="visible" @deal-card="handleDealCards"></CardArea>
@@ -49,7 +50,7 @@
     <div v-if="showColorPicker" fixed top-0 left-0 right-0 bottom-0 z-100 flex items-center justify-center bg="#00000066">
       <div class="card-prompt">
         <h2 class="prompt-title">选择颜色</h2>
-        <p class="prompt-desc">打出换色牌，挑一个新的颜色。</p>
+        <p class="prompt-desc">{{ colorPromptDescription }}</p>
         <div class="prompt-color-grid">
           <label class="prompt-color-option" :class="{ active: selectColor === '#FF6666' }" :style="{ '--swatch': '#FF6666' }">
             <input type="radio" value="#FF6666" v-model="selectColor">
@@ -78,7 +79,7 @@
     <div v-if="showChallenge" fixed top-0 left-0 right-0 bottom-0 z-100 flex items-center justify-center bg="#00000066">
       <div w="70 sm:96" bg="white dark:black" b="4 dashed gray-300 rounded-4" p-4 text="gray-700 dark:gray-200">
         <h2 text="5" font-bold mb-3>+4 质疑</h2>
-        <p mb-4>{{ challengeInfo.actorName }} 打出了 +4，选择是否质疑。</p>
+        <p mb-4>{{ challengeInfo.actorName }} 打出了 +4。质疑失败同样摸 4 张。</p>
         <div flex justify="evenly" gap-3>
           <button c-red-500 b="red-500 rounded-2 2" px-3 py-2 @click="resolveChallenge(true)">质疑</button>
           <button c-gray-600 b="gray-400 rounded-2 2" px-3 py-2 @click="resolveChallenge(false)">接受 +4</button>
@@ -87,7 +88,7 @@
     </div>
     <div v-if="showTargetPicker" fixed top-0 left-0 right-0 bottom-0 z-100 flex items-center justify-center bg="#00000066">
       <div class="card-prompt">
-        <h2 class="prompt-title">{{ targetActionType === 'bomb' ? '炸弹牌' : '指定目标牌' }}</h2>
+        <h2 class="prompt-title">指定目标牌</h2>
         <p class="prompt-desc">选择一名其他玩家作为目标。</p>
         <div class="prompt-option-list">
           <label v-for="target in targetOptions" :key="target.id" class="prompt-option" :class="{ active: selectedTargetId === target.id }">
@@ -114,6 +115,7 @@ const roomStore = useRoomStore();
 const userStore = useUserStore();
 
 const gameLastCard = computed(() => roomStore.lastCard)
+const drawPenalty = computed(() => roomStore.accumulation)
 
 interface GameLogEntry {
   id: number
@@ -169,13 +171,20 @@ const handleLeave = () => {
 }
 
 const selectColor = ref<CardColor>('#FF6666')
+const colorActionType = ref<'palette' | 'add-4' | 'target'>('palette')
+const colorPromptDescription = computed(() => colorActionType.value === 'target'
+  ? '选择目标玩家必须打出的颜色；没有该颜色或换色牌时将摸 4 张。'
+  : colorActionType.value === 'add-4'
+    ? '选择颜色后，下一位玩家可以接受或质疑。'
+    : '挑一个新的出牌颜色。')
 const showColorPicker = ref(false)
 const showChallenge = ref(false)
-const challengeInfo = ref({ actorName: '', color: '#FF6666' as CardColor, penalty: 4, challengePenalty: 6 })
+const challengeInfo = ref({ actorName: '', color: '#FF6666' as CardColor, penalty: 4, challengePenalty: 4 })
 const showTargetPicker = ref(false)
-const targetActionType = ref<'target' | 'bomb'>('target')
 const targetOptions = ref<TargetPlayer[]>([])
 const selectedTargetId = ref('')
+let bombColorTimer: ReturnType<typeof setInterval> | undefined
+let bombColorFinishTimer: ReturnType<typeof setTimeout> | undefined
 const submitColor = () => {
   socketStore.submitColor(selectColor.value, roomStore.roomCode);
   selectColor.value = '#FF6666'
@@ -210,10 +219,12 @@ const submitTarget = () => {
 onBeforeMount(() => {
   addGameLog('牌局记录已开始')
   eventBus.on('GAME_LOG', handleGameLog)
-  eventBus.on('NEXT_TURN', ({ lastCard, order, players }) => {
+  eventBus.on('NEXT_TURN', ({ lastCard, order, players, accumulation, pendingAction }) => {
     roomStore.setRoomInfoProp<'lastCard'>('lastCard', lastCard);
     roomStore.setRoomInfoProp<'order'>('order', order);
     roomStore.setRoomInfoProp<'players'>('players', players);
+    roomStore.setRoomInfoProp<'accumulation'>('accumulation', accumulation);
+    roomStore.setRoomInfoProp<'pendingAction'>('pendingAction', pendingAction);
   })
   eventBus.on('GAME_IS_OVER', ({ winnerOrder, endTime, players, owner, canReplay }) => {
     roomStore.setRoomInfoProp<'winnerOrder'>('winnerOrder', winnerOrder);
@@ -231,21 +242,37 @@ onBeforeMount(() => {
       router.push('/end');
     }
   })
-  eventBus.on('SELECT_COLOR', () => {
+  eventBus.on('SELECT_COLOR', ({ cardType }) => {
+    colorActionType.value = cardType
     showColorPicker.value = true;
   })
   eventBus.on('CHALLENGE_AVAILABLE', (data) => {
     challengeInfo.value = data
     showChallenge.value = true
   })
-  eventBus.on('SELECT_TARGET', ({ cardType, targets }) => {
-    targetActionType.value = cardType
+  eventBus.on('SELECT_TARGET', ({ targets }) => {
     targetOptions.value = targets
     selectedTargetId.value = ''
     showTargetPicker.value = true
   })
   eventBus.on('COLOR_IS_CHANGE', (data) => {
-    roomStore.setRoomInfoProp<'lastCard'>('lastCard', Object.assign(roomStore.lastCard as CardInfo, { color: data }));
+    if (roomStore.lastCard) {
+      roomStore.setRoomInfoProp<'lastCard'>('lastCard', Object.assign(roomStore.lastCard, { color: data }));
+    }
+  })
+  eventBus.on('BOMB_COLOR_ROLL', ({ finalColor }) => {
+    const colors: CardColor[] = ['#FF6666', '#FFCC33', '#99CC66', '#99CCFF']
+    let index = 0
+    if (bombColorTimer) clearInterval(bombColorTimer)
+    if (bombColorFinishTimer) clearTimeout(bombColorFinishTimer)
+    bombColorTimer = setInterval(() => {
+      if (roomStore.lastCard) roomStore.lastCard.color = colors[index++ % colors.length]
+    }, 110)
+    bombColorFinishTimer = setTimeout(() => {
+      if (bombColorTimer) clearInterval(bombColorTimer)
+      bombColorTimer = undefined
+      if (roomStore.lastCard) roomStore.lastCard.color = finalColor
+    }, 1320)
   })
   eventBus.on('RES_DEAL_CARDS', (data) => {
     roomStore.setUserCards(data)
@@ -257,6 +284,8 @@ onBeforeMount(() => {
 
 onBeforeUnmount(() => {
   if (unoAnnouncementTimer) clearTimeout(unoAnnouncementTimer)
+  if (bombColorTimer) clearInterval(bombColorTimer)
+  if (bombColorFinishTimer) clearTimeout(bombColorFinishTimer)
   eventBus.removeAllListeners('GAME_LOG')
   eventBus.removeAllListeners('NEXT_TURN')
   eventBus.removeAllListeners('GAME_IS_OVER')
@@ -265,6 +294,7 @@ onBeforeUnmount(() => {
   eventBus.removeAllListeners('COLOR_IS_CHANGE');
   eventBus.removeAllListeners('CHALLENGE_AVAILABLE');
   eventBus.removeAllListeners('SELECT_TARGET');
+  eventBus.removeAllListeners('BOMB_COLOR_ROLL');
   eventBus.removeAllListeners('DEAL_CARDS');
   eventBus.removeAllListeners('CHANGE_UNO_STATUS');
 })
@@ -488,6 +518,27 @@ onBeforeUnmount(() => {
   width: 84px;
   height: 108px;
   flex: none;
+}
+
+.draw-counter {
+  position: absolute;
+  z-index: 4;
+  top: -10px;
+  right: -20px;
+  display: inline-flex;
+  min-width: 34px;
+  height: 34px;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  padding: 0 8px;
+  color: #fff;
+  font-size: 15px;
+  font-weight: 800;
+  background: #c64b4e;
+  border: 3px solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 5px 14px rgba(78, 22, 25, 0.28);
 }
 
 .discard-stack::before,

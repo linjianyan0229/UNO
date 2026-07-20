@@ -7,6 +7,8 @@ import { handlePlayerDisconnect } from './controllers/room';
 
 const port = Number(process.env.UNO_PORT || 3000);
 const wss = new WebSocketServer({ port });
+const heartbeatInterval = Number(process.env.WS_HEARTBEAT_INTERVAL || 25_000);
+const liveClients = new WeakSet<WebSocket.WebSocket>();
 
 export const eventBus = new EventEmitter();
 
@@ -41,6 +43,9 @@ events.forEach((key) => {
 })
 
 wss.on('connection', function connection(ws) {
+  liveClients.add(ws);
+  ws.on('pong', () => liveClients.add(ws));
+
   // 监听消息
   ws.on('message', function incoming(message) {
     const { type, data } = JSON.parse(message.toString())
@@ -64,3 +69,17 @@ wss.on('connection', function connection(ws) {
     message: '欢迎来到UNO世界！',
   }))
 });
+
+// Keep proxy/CDN WebSocket connections active and remove half-open clients.
+const heartbeatTimer = setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if (!liveClients.has(ws)) {
+      ws.terminate();
+      return;
+    }
+    liveClients.delete(ws);
+    ws.ping();
+  });
+}, heartbeatInterval);
+
+wss.on('close', () => clearInterval(heartbeatTimer));

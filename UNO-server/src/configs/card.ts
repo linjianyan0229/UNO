@@ -12,7 +12,7 @@ export const colorList: {
   '#FF6666': '红色', '#99CC66': '绿色', '#99CCFF': '蓝色', '#FFCC33': '黄色'
 }
 
-export const cardInfomation = (): CardInfo[] => [
+export const cardInfomation = (playerCount = 3): CardInfo[] => [
   ...[...[...genArr0To9, ...genArr1To9].map((i) => {
     return {
       type: `number-${i}`,
@@ -23,10 +23,10 @@ export const cardInfomation = (): CardInfo[] => [
     type: 'exchange',
     icon: 'fa6-solid:arrow-right-arrow-left',
   },
-  {
+  ...(playerCount === 2 ? [] : [{
     type: 'ban',
     icon: 'fa6-solid:ban',
-  },
+  }]),
 
   {
     type: 'add-2',

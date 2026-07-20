@@ -118,13 +118,14 @@ export function updatePlayerListToPlayers(roomCode: string, players: PlayerInfo[
 // 开始游戏，更新房间信息
 export function updateRoomInfoAtStart(roomInfo: RoomInfo) {
   // 生成游戏卡牌
-  roomInfo.gameCards = useCards();
+  roomInfo.gameCards = useCards(roomInfo.players.length);
   roomInfo.players.forEach((item) => {
     item.lastCard = null
   })
   roomInfo.createTime = Date.now();
   roomInfo.startTime = Date.now();
   roomInfo.status = 'GAMING'
+  roomInfo.accumulation = 0
   roomInfo.pendingAction = null
 }
 

@@ -3,16 +3,18 @@ import { get } from '../utils/customCRUD';
 import { emitAllPlayers, roomCollection } from './room';
 import { send } from '../controllers/room';
 import {
+  checkCards,
   drawCardsForPlayer,
   emitAfterPenalty,
   emitGameOver,
   emitToNextTurn,
+  emitToPlayerTurn,
   getActiveColor,
   getNextOrder,
   getSpecifiedCards,
+  getPlayConstraint,
   hasMatchingColor,
   isNumberCard,
-  isUniversalCard,
   removeCardsFromPlayer
 } from './game';
 
@@ -21,10 +23,6 @@ const aiChallengeTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 function notice(roomCode: string, message: string) {
   emitAllPlayers(roomCode, { message, data: null, type: 'GAME_NOTICE' });
-}
-
-function playable(card: CardInfo, lastCard: CardInfo | null) {
-  return !lastCard || isUniversalCard(card) || card.color === lastCard.color || card.type === lastCard.type;
 }
 
 function chooseColor(player: PlayerInfo): CardColor {
@@ -54,7 +52,7 @@ function chooseCards(roomInfo: RoomInfo, player: PlayerInfo) {
   const hasColor = lastCard ? hasMatchingColor(player.cards, activeColor) : false;
   const candidates = player.cards
     .map((card, index) => ({ card, index }))
-    .filter(({ card }) => playable(card, lastCard));
+    .filter(({ index }) => checkCards(player.cards, [index], lastCard, getPlayConstraint(roomInfo)));
   if (!candidates.length) return [];
 
   const difficulty = player.aiDifficulty || 'normal';
@@ -102,11 +100,9 @@ function applyAIPlayedCard(roomCode: string, roomInfo: RoomInfo, player: PlayerI
       break;
     }
     case 'add-2': {
-      const skipped = getNextOrder(roomInfo);
-      const target = roomInfo.players[skipped];
-      if (target) drawCardsForPlayer(roomInfo, target, 2);
-      notice(roomCode, `${target?.name || '下一位玩家'} 获得 +2`);
-      emitAfterPenalty(roomCode, roomInfo, skipped);
+      roomInfo.accumulation += 2;
+      notice(roomCode, `${player.name} 将 +2 累计到 ${roomInfo.accumulation}`);
+      finishTurn(roomCode, roomInfo);
       break;
     }
     case 'palette': {
@@ -135,19 +131,55 @@ function applyAIPlayedCard(roomCode: string, roomInfo: RoomInfo, player: PlayerI
       else send(target.socketInstance, {
         message: '你可以质疑这张 +4，也可以接受处罚',
         type: 'CHALLENGE_AVAILABLE',
-        data: { actorName: player.name, color, penalty: 4, challengePenalty: 6 }
+        data: { actorName: player.name, color, penalty: 4, challengePenalty: 4 }
       });
       break;
     }
-    case 'target':
-    case 'bomb': {
+    case 'target': {
       const target = roomInfo.players.find((candidate) => !candidate.isAI && candidate.id !== player.id);
       if (!target) return finishTurn(roomCode, roomInfo);
-      const penalty = playedCard.type === 'bomb' ? 5 : 2;
       const targetIndex = roomInfo.players.findIndex((candidate) => candidate.id === target.id);
-      drawCardsForPlayer(roomInfo, target, penalty);
-      notice(roomCode, `${player.name} 指定 ${target.name}，获得 ${penalty} 张牌并跳过本轮`);
-      emitAfterPenalty(roomCode, roomInfo, targetIndex);
+      const color = chooseColor(player);
+      if (roomInfo.lastCard) roomInfo.lastCard.color = color;
+      if (player.lastCard) player.lastCard.color = color;
+      emitAllPlayers(roomCode, { message: `AI 指定了${color}`, type: 'COLOR_IS_CHANGE', data: color });
+      roomInfo.pendingAction = {
+        kind: 'FORCED_COLOR',
+        source: 'target',
+        actorId: player.id,
+        targetId: target.id,
+        color,
+        penalty: 4,
+        allowPalette: true
+      };
+      notice(roomCode, `${player.name} 指定 ${target.name} 打出对应颜色`);
+      emitToPlayerTurn(roomCode, roomInfo, targetIndex);
+      break;
+    }
+    case 'bomb': {
+      const colors: CardColor[] = ['#FF6666', '#99CC66', '#99CCFF', '#FFCC33'];
+      const color = colors[Math.floor(Math.random() * colors.length)];
+      const penalty = 4 + Math.floor(Math.random() * 5);
+      if (roomInfo.lastCard) roomInfo.lastCard.color = color;
+      if (player.lastCard) player.lastCard.color = color;
+      emitAllPlayers(roomCode, {
+        message: `炸弹选中颜色，未命中将摸 ${penalty} 张牌`,
+        type: 'BOMB_COLOR_ROLL',
+        data: { finalColor: color, penalty }
+      });
+      const targetIndex = getNextOrder(roomInfo);
+      const target = roomInfo.players[targetIndex];
+      if (!target) return finishTurn(roomCode, roomInfo);
+      roomInfo.pendingAction = {
+        kind: 'FORCED_COLOR',
+        source: 'bomb',
+        actorId: player.id,
+        targetId: target.id,
+        color,
+        penalty,
+        allowPalette: false
+      };
+      emitToPlayerTurn(roomCode, roomInfo, targetIndex);
       break;
     }
     default:
@@ -157,7 +189,9 @@ function applyAIPlayedCard(roomCode: string, roomInfo: RoomInfo, player: PlayerI
 
 function runAITurn(roomCode: string) {
   const roomInfo = get(roomCollection, roomCode);
-  if (!roomInfo || roomInfo.status !== 'GAMING' || roomInfo.pendingAction) return;
+  if (!roomInfo || roomInfo.status !== 'GAMING') return;
+  const forcedResponse = roomInfo.pendingAction?.kind === 'FORCED_COLOR' ? roomInfo.pendingAction : undefined;
+  if (roomInfo.pendingAction && !forcedResponse) return;
   const player = roomInfo.players[roomInfo.order];
   if (!player?.isAI) return;
 
@@ -187,12 +221,13 @@ function runAITurn(roomCode: string) {
   }
   if (player.cards.length === 0) {
     if (!player.uno) {
-      player.cards.push(...getSpecifiedCards(roomInfo.gameCards, 2));
+      player.cards.push(...getSpecifiedCards(roomInfo.gameCards, 2, roomInfo.players.length));
       notice(roomCode, `${player.name} 忘记 UNO，获得 2 张牌`);
     } else {
       return emitGameOver(roomInfo, roomCode);
     }
   }
+  if (forcedResponse) roomInfo.pendingAction = null;
   applyAIPlayedCard(roomCode, roomInfo, player, playedCard, actorHadMatchingColor);
 }
 
@@ -222,8 +257,8 @@ export function scheduleAIChallenge(roomCode: string) {
       drawCardsForPlayer(roomInfo, actor, 4);
       notice(roomCode, `${challenger.name} 质疑成功，${actor.name} 获得 4 张牌`);
     } else {
-      drawCardsForPlayer(roomInfo, challenger, 6);
-      notice(roomCode, `${challenger.name} 质疑失败，获得 6 张牌`);
+      drawCardsForPlayer(roomInfo, challenger, 4);
+      notice(roomCode, `${challenger.name} 质疑失败，获得 4 张牌`);
     }
     roomInfo.pendingAction = null;
     const challengerIndex = roomInfo.players.findIndex((player) => player.id === challenger.id);

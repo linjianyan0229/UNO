@@ -1,32 +1,20 @@
 import mysql from 'mysql2/promise';
 
-// 本地默认: 127.0.0.1:3306 root/123456 库 uno,可用环境变量覆盖(docker 里 MYSQL_HOST=mysql)
+// Production credentials are supplied through environment variables.
 const config = {
   host: process.env.MYSQL_HOST || '127.0.0.1',
   port: Number(process.env.MYSQL_PORT || 3306),
   user: process.env.MYSQL_USER || 'root',
-  password: process.env.MYSQL_PASSWORD || '123456',
+  password: process.env.MYSQL_PASSWORD || '',
   database: process.env.MYSQL_DATABASE || 'uno',
 };
 
 // 连接池(初始化完成后赋值)
 export let pool: mysql.Pool | undefined;
 
-// 初始化:确保数据库与表存在。失败只记录日志,不让进程崩溃(账号相关接口会返回友好错误)
+// The database itself is provisioned by deployment; the app owns its tables only.
 export const dbReady: Promise<void> = (async () => {
   try {
-    // 先用不指定 database 的连接建库
-    const bootstrap = await mysql.createConnection({
-      host: config.host,
-      port: config.port,
-      user: config.user,
-      password: config.password,
-    });
-    await bootstrap.query(
-      `CREATE DATABASE IF NOT EXISTS \`${config.database}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci`
-    );
-    await bootstrap.end();
-
     pool = mysql.createPool({
       ...config,
       waitForConnections: true,

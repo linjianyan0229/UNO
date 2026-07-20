@@ -1,13 +1,16 @@
-FROM node:20-alpine as builder
+FROM node:24-alpine AS builder
 
 WORKDIR /code
 
-RUN npm install pnpm -g
+RUN npm install --global pnpm@11.14.0
 
-ADD ./UNO-server/package.json ./UNO-server/pnpm-lock.yaml /code/
-RUN pnpm i
+COPY ./UNO-server/package.json ./UNO-server/pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
 
-ADD ./UNO-server /code/
-RUN pnpm build 
+COPY ./UNO-server ./
+RUN pnpm build
 
-CMD node ./dist/index.js
+ENV NODE_ENV=production
+EXPOSE 3000
+
+CMD ["node", "./dist/index.js"]

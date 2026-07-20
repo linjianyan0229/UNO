@@ -76,8 +76,10 @@ declare interface ServerToClientEvents {
   DEAL_CARDS: ServerEventListenersCb<'RES_DEAL_CARDS', CardInfo[]>
   NEXT_TURN: ServerEventListenersCb<'NEXT_TURN', {
     players: PlayerInfo[],
-    lastCard: CardInfo,
+    lastCard: CardInfo | null,
     order: number;
+    accumulation: number;
+    pendingAction: PendingAction | null;
   }>
   RES_OUT_OF_THE_CARD: ServerEventListenersCb<'RES_OUT_OF_THE_CARD', CardInfo[] | null>
   GAME_IS_OVER: ServerEventListenersCb<'GAME_IS_OVER', {
@@ -90,12 +92,13 @@ declare interface ServerToClientEvents {
   RES_GET_ONE_CARD: ServerEventListenersCb<'RES_OUT_OF_THE_CARD', {
     card: CardInfo;
     userCards: CardInfo[]
+    penaltyResolved?: boolean
   }>
   RES_NEXT_TURN: ServerEventListenersCb<'RES_NEXT_TURN', null>
-  SELECT_COLOR: ServerEventListenersCb<'SELECT_COLOR', { cardType: 'palette' | 'add-4' }>
+  SELECT_COLOR: ServerEventListenersCb<'SELECT_COLOR', { cardType: 'palette' | 'add-4' | 'target' }>
   COLOR_IS_CHANGE: ServerEventListenersCb<'COLOR_IS_CHANGE', CardColor>
   SELECT_TARGET: ServerEventListenersCb<'SELECT_TARGET', {
-    cardType: 'target' | 'bomb',
+    cardType: 'target',
     targets: TargetPlayer[]
   }>
   CHALLENGE_AVAILABLE: ServerEventListenersCb<'CHALLENGE_AVAILABLE', {
@@ -103,6 +106,10 @@ declare interface ServerToClientEvents {
     color: CardColor,
     penalty: number,
     challengePenalty: number
+  }>
+  BOMB_COLOR_ROLL: ServerEventListenersCb<'BOMB_COLOR_ROLL', {
+    finalColor: CardColor,
+    penalty: number
   }>
   GAME_NOTICE: ServerEventListenersCb<'GAME_NOTICE', null>
   RES_START_AI_GAME: ServerEventListenersCb<'RES_START_AI_GAME', {
@@ -127,7 +134,7 @@ declare type ClientGameEvents = 'OUT_OF_THE_CARD' | 'START_GAME' | 'START_AI_GAM
 
 declare type ServerRoomEvents = 'RES_CREATE_ROOM' | 'RES_JOIN_ROOM' | 'RES_LEAVE_ROOM' | 'RES_DISSOLVE_ROOM' | 'RES_ROOM_LIST'
 declare type ServerUserEvents = 'RES_REGISTER' | 'RES_LOGIN' | 'RES_AUTO_LOGIN' | 'RES_UPDATE_PROFILE'
-declare type ServerRGameEvents = 'RES_SUBMIT_COLOR' | 'RES_DEAL_CARDS' | 'UPDATE_PLAYER_LIST' | 'UPDATE_ROOM_INFO' | 'GAME_IS_START' | 'RES_START_GAME' | 'RES_START_AI_GAME' | 'DEAL_CARDS' | 'NEXT_TURN' | 'RES_OUT_OF_THE_CARD' | 'GAME_IS_OVER' | 'RES_GET_ONE_CARD' | 'RES_NEXT_TURN' | 'SELECT_COLOR' | 'COLOR_IS_CHANGE' | 'SELECT_TARGET' | 'CHALLENGE_AVAILABLE' | 'GAME_NOTICE' | 'RES_UNO' | 'CHANGE_UNO_STATUS'
+declare type ServerRGameEvents = 'RES_SUBMIT_COLOR' | 'RES_DEAL_CARDS' | 'UPDATE_PLAYER_LIST' | 'UPDATE_ROOM_INFO' | 'GAME_IS_START' | 'RES_START_GAME' | 'RES_START_AI_GAME' | 'DEAL_CARDS' | 'NEXT_TURN' | 'RES_OUT_OF_THE_CARD' | 'GAME_IS_OVER' | 'RES_GET_ONE_CARD' | 'RES_NEXT_TURN' | 'SELECT_COLOR' | 'COLOR_IS_CHANGE' | 'SELECT_TARGET' | 'CHALLENGE_AVAILABLE' | 'BOMB_COLOR_ROLL' | 'GAME_NOTICE' | 'RES_UNO' | 'CHANGE_UNO_STATUS'
 
 
 

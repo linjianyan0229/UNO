@@ -1,15 +1,16 @@
-FROM node:14-alpine as builder
+FROM node:24-alpine AS builder
 
 WORKDIR /code
 
-RUN npm install pnpm -g
+RUN npm install --global pnpm@11.14.0
 
-ADD ./UNO-client/package.json ./UNO-client/pnpm-lock.yaml /code/
-RUN pnpm i
+COPY ./UNO-client/package.json ./UNO-client/pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
 
-ADD ./UNO-client /code/
+COPY ./UNO-client ./
 RUN pnpm build
 
-FROM nginx:alpine
-ADD nginx.prod.conf /etc/nginx/conf.d/default.conf
-COPY --from=builder code/dist /usr/share/nginx/html
+FROM nginx:1.29-alpine
+
+COPY nginx.prod.conf /etc/nginx/conf.d/default.conf
+COPY --from=builder /code/dist /usr/share/nginx/html

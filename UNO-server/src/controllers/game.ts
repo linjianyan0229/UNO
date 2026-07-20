@@ -8,8 +8,10 @@ import {
   emitAfterPenalty,
   emitGameOver,
   emitToNextTurn,
+  emitToPlayerTurn,
   getActiveColor,
   getNextOrder,
+  getPlayConstraint,
   getSpecifiedCards,
   hasMatchingColor,
   isFunctionCard,
@@ -18,7 +20,7 @@ import {
   useCards,
 } from '../services/game';
 import type { ClientGameEvents, ClientToServerEvents } from 'types/server';
-import type { RoomInfo } from 'types/room';
+import type { PlayerInfo, RoomInfo } from 'types/room';
 import { colorList } from '../configs';
 import { send } from './room';
 import WebSocket from 'ws';
@@ -46,6 +48,17 @@ function finishNormalTurn(roomCode: string, roomInfo: RoomInfo) {
   emitToNextTurn(roomCode, roomInfo);
 }
 
+const concreteColors = Object.keys(colorList) as CardColor[];
+
+function randomColor() {
+  return concreteColors[Math.floor(Math.random() * concreteColors.length)];
+}
+
+function setPlayedCardColor(roomInfo: RoomInfo, player: PlayerInfo, color: CardColor) {
+  if (roomInfo.lastCard) roomInfo.lastCard.color = color;
+  if (player.lastCard) player.lastCard.color = color;
+}
+
 function startRoomGame(roomCode: string, roomInfo: RoomInfo) {
   updateRoomInfoAtStart(roomInfo);
   roomInfo.order = -1;
@@ -56,7 +69,8 @@ function startRoomGame(roomCode: string, roomInfo: RoomInfo) {
     player.lastCard = null;
     player.uno = false;
   });
-  roomInfo.gameCards = useCards();
+  roomInfo.accumulation = 0;
+  roomInfo.gameCards = useCards(roomInfo.players.length);
   dealCardsToPlayers(roomInfo);
   emitToNextTurn(roomCode, roomInfo);
 }
@@ -103,34 +117,40 @@ const gameControllers: Pick<ClientToServerEvents, ClientGameEvents> = {
     const { roomCode, cardsIndex } = data;
     const roomInfo = get(roomCollection, roomCode);
     if (!roomInfo) return sendError(ws, 'RES_OUT_OF_THE_CARD', '房间不存在');
-    if (roomInfo.pendingAction) return sendError(ws, 'RES_OUT_OF_THE_CARD', '请先完成当前卡牌效果');
+    const forcedResponse = roomInfo.pendingAction?.kind === 'FORCED_COLOR' ? roomInfo.pendingAction : undefined;
+    if (roomInfo.pendingAction && !forcedResponse) {
+      return sendError(ws, 'RES_OUT_OF_THE_CARD', '请先完成当前卡牌效果');
+    }
     const player = getCurrentPlayer(roomInfo, ws);
     if (!player) return sendError(ws, 'RES_OUT_OF_THE_CARD', '现在还没轮到你出牌');
+    if (forcedResponse && forcedResponse.targetId !== player.id) {
+      return sendError(ws, 'RES_OUT_OF_THE_CARD', '当前应由指定玩家出牌');
+    }
     if (!cardsIndex.length) return sendError(ws, 'RES_OUT_OF_THE_CARD', '请选择要出的牌');
 
     const activeColor = getActiveColor(roomInfo.lastCard);
     const actorHadMatchingColor = roomInfo.lastCard ? hasMatchingColor(player.cards, activeColor) : false;
-    if (!checkCards(player.cards, cardsIndex, roomInfo.lastCard)) {
-      return sendError(ws, 'RES_OUT_OF_THE_CARD', '出牌不符合规则：多牌必须是相同点数的数字牌');
+    if (!checkCards(player.cards, cardsIndex, roomInfo.lastCard, getPlayConstraint(roomInfo))) {
+      const rule = forcedResponse
+        ? `必须打出${colorList[forcedResponse.color]}牌${forcedResponse.allowPalette ? '或换色牌' : ''}`
+        : roomInfo.accumulation > 0
+          ? '必须打出当前同色牌、反转牌或换色牌'
+          : '多牌必须是相同点数的数字牌';
+      return sendError(ws, 'RES_OUT_OF_THE_CARD', `出牌不符合规则：${rule}`);
     }
 
     const playedCards = removeCardsFromPlayer(player, cardsIndex, roomInfo);
     const playedCard = playedCards[playedCards.length - 1];
     if (!playedCard) return sendError(ws, 'RES_OUT_OF_THE_CARD', '出牌无效');
 
-    // 指定目标牌和炸弹牌沿用当前颜色，避免效果结束后牌局失去颜色上下文
-    if (playedCard.type === 'target' || playedCard.type === 'bomb') {
-      playedCard.color = activeColor;
-      player.lastCard = { ...playedCard };
-      roomInfo.lastCard = { ...playedCard };
-    }
+    if (forcedResponse) roomInfo.pendingAction = null;
 
     send(ws, { message: '出牌成功', data: player.cards, type: 'RES_OUT_OF_THE_CARD' });
     sendGameNotice(roomCode, `${player.name} 打出${playedCards.length > 1 ? `了 ${playedCards.length} 张牌` : '了一张牌'}`);
 
     // 没有喊 UNO 而直接出完牌，补两张后继续游戏
     if (player.cards.length === 0 && !player.uno) {
-      player.cards.push(...getSpecifiedCards(roomInfo.gameCards, 2));
+      player.cards.push(...getSpecifiedCards(roomInfo.gameCards, 2, roomInfo.players.length));
       send(ws, {
         message: '请记得UNO！获得手牌2张',
         data: player.cards,
@@ -155,11 +175,9 @@ const gameControllers: Pick<ClientToServerEvents, ClientGameEvents> = {
         break;
       }
       case 'add-2': {
-        const skipped = getNextOrder(roomInfo);
-        const target = roomInfo.players[skipped];
-        if (target) drawCardsForPlayer(roomInfo, target, 2);
-        sendGameNotice(roomCode, `${target?.name || '下一位玩家'} 获得 +2`);
-        emitAfterPenalty(roomCode, roomInfo, skipped);
+        roomInfo.accumulation += 2;
+        sendGameNotice(roomCode, `${player.name} 将 +2 累计到 ${roomInfo.accumulation}`);
+        finishNormalTurn(roomCode, roomInfo);
         break;
       }
       case 'palette':
@@ -180,17 +198,40 @@ const gameControllers: Pick<ClientToServerEvents, ClientGameEvents> = {
         };
         send(ws, { message: '请选择颜色，之后由下一位决定是否质疑', type: 'SELECT_COLOR', data: { cardType: 'add-4' } });
         break;
-      case 'target':
-      case 'bomb': {
-        roomInfo.pendingAction = { kind: 'TARGET', actorId: player.id, cardType: playedCard.type };
+      case 'target': {
+        roomInfo.pendingAction = { kind: 'TARGET', actorId: player.id, cardType: 'target' };
         const targets = roomInfo.players
           .filter((target) => target.id !== player.id)
           .map((target) => ({ id: target.id, name: target.name }));
         send(ws, {
-          message: playedCard.type === 'bomb' ? '请选择炸弹目标' : '请选择指定目标',
+          message: '请选择指定目标',
           type: 'SELECT_TARGET',
-          data: { cardType: playedCard.type, targets }
+          data: { cardType: 'target', targets }
         });
+        break;
+      }
+      case 'bomb': {
+        const color = randomColor();
+        const penalty = 4 + Math.floor(Math.random() * 5);
+        setPlayedCardColor(roomInfo, player, color);
+        emitAllPlayers(roomCode, {
+          message: `炸弹随机到${colorList[color]}，未命中将摸 ${penalty} 张牌`,
+          type: 'BOMB_COLOR_ROLL',
+          data: { finalColor: color, penalty }
+        });
+        const targetIndex = getNextOrder(roomInfo);
+        const target = roomInfo.players[targetIndex];
+        if (!target) return;
+        roomInfo.pendingAction = {
+          kind: 'FORCED_COLOR',
+          source: 'bomb',
+          actorId: player.id,
+          targetId: target.id,
+          color,
+          penalty,
+          allowPalette: false
+        };
+        emitToPlayerTurn(roomCode, roomInfo, targetIndex);
         break;
       }
       default:
@@ -200,10 +241,29 @@ const gameControllers: Pick<ClientToServerEvents, ClientGameEvents> = {
   GET_ONE_CARD: (roomCode, ws) => {
     const roomInfo = get(roomCollection, roomCode);
     if (!roomInfo) return sendError(ws, 'RES_GET_ONE_CARD', '房间不存在');
-    if (roomInfo.pendingAction) return sendError(ws, 'RES_GET_ONE_CARD', '请先完成当前卡牌效果');
     const player = getCurrentPlayer(roomInfo, ws);
     if (!player) return sendError(ws, 'RES_GET_ONE_CARD', '现在还没轮到你');
-    const card = getSpecifiedCards(roomInfo.gameCards, 1)[0];
+    const forced = roomInfo.pendingAction?.kind === 'FORCED_COLOR' ? roomInfo.pendingAction : undefined;
+    if (roomInfo.pendingAction && !forced) return sendError(ws, 'RES_GET_ONE_CARD', '请先完成当前卡牌效果');
+    if (forced && forced.targetId !== player.id) return sendError(ws, 'RES_GET_ONE_CARD', '当前应由指定玩家操作');
+
+    const penalty = forced?.penalty || roomInfo.accumulation;
+    if (penalty > 0) {
+      const drawn = getSpecifiedCards(roomInfo.gameCards, penalty, roomInfo.players.length);
+      player.cards.push(...drawn);
+      roomInfo.pendingAction = null;
+      roomInfo.accumulation = 0;
+      if (player.cards.length > 1 && player.uno) changePlayerUNOStatus(ws, player, false);
+      sendGameNotice(roomCode, `${player.name} 接受处罚，获得 ${penalty} 张牌`);
+      send(ws, {
+        data: { userCards: player.cards, card: drawn[0], penaltyResolved: true },
+        type: 'RES_GET_ONE_CARD'
+      });
+      emitToNextTurn(roomCode, roomInfo);
+      return;
+    }
+
+    const card = getSpecifiedCards(roomInfo.gameCards, 1, roomInfo.players.length)[0];
     if (!card) return sendError(ws, 'RES_GET_ONE_CARD', '暂时没有可摸的牌');
     player.cards.push(card);
     if (player.cards.length > 1 && player.uno) changePlayerUNOStatus(ws, player, false);
@@ -217,6 +277,7 @@ const gameControllers: Pick<ClientToServerEvents, ClientGameEvents> = {
     const roomInfo = get(roomCollection, roomCode);
     if (!roomInfo) return sendError(ws, 'RES_NEXT_TURN', '房间不存在');
     if (roomInfo.pendingAction) return sendError(ws, 'RES_NEXT_TURN', '请先完成当前卡牌效果');
+    if (roomInfo.accumulation > 0) return sendError(ws, 'RES_NEXT_TURN', '请出牌传递 +2，或接受累计处罚');
     if (!getCurrentPlayer(roomInfo, ws)) return sendError(ws, 'RES_NEXT_TURN', '现在还没轮到你');
     emitToNextTurn(roomCode, roomInfo);
   },
@@ -227,17 +288,34 @@ const gameControllers: Pick<ClientToServerEvents, ClientGameEvents> = {
     if (!isConcreteColor(color)) return sendError(ws, 'RES_SUBMIT_COLOR', '颜色无效');
     const player = getPlayer(roomInfo, ws);
     const pending = roomInfo.pendingAction;
-    if (!player || !pending || pending.kind !== 'COLOR' || pending.actorId !== player.id) {
+    if (!player || !pending || (pending.kind !== 'COLOR' && pending.kind !== 'TARGET_COLOR') || pending.actorId !== player.id) {
       return sendError(ws, 'RES_SUBMIT_COLOR', '当前没有等待你选择颜色的牌');
     }
 
-    if (roomInfo.lastCard) roomInfo.lastCard.color = color;
-    if (player.lastCard) player.lastCard.color = color;
+    setPlayedCardColor(roomInfo, player, color);
     emitAllPlayers(roomCode, {
       message: '卡牌颜色更改为：' + colorList[color],
       type: 'COLOR_IS_CHANGE',
       data: color
     });
+
+    if (pending.kind === 'TARGET_COLOR') {
+      const targetIndex = roomInfo.players.findIndex((target) => target.id === pending.targetId);
+      const target = roomInfo.players[targetIndex];
+      if (!target) return sendError(ws, 'RES_SUBMIT_COLOR', '目标玩家不存在');
+      roomInfo.pendingAction = {
+        kind: 'FORCED_COLOR',
+        source: 'target',
+        actorId: player.id,
+        targetId: target.id,
+        color,
+        penalty: 4,
+        allowPalette: true
+      };
+      sendGameNotice(roomCode, `${player.name} 指定 ${target.name} 打出${colorList[color]}牌`);
+      emitToPlayerTurn(roomCode, roomInfo, targetIndex);
+      return;
+    }
 
     if (pending.cardType === 'palette') {
       finishNormalTurn(roomCode, roomInfo);
@@ -256,7 +334,7 @@ const gameControllers: Pick<ClientToServerEvents, ClientGameEvents> = {
     send(target.socketInstance, {
       message: '你可以质疑这张 +4，也可以接受处罚',
       type: 'CHALLENGE_AVAILABLE',
-      data: { actorName: player.name, color, penalty: 4, challengePenalty: 6 }
+      data: { actorName: player.name, color, penalty: 4, challengePenalty: 4 }
     });
     if (target.isAI) {
       void import('../services/ai').then(({ scheduleAIChallenge }) => scheduleAIChallenge(roomCode));
@@ -276,11 +354,12 @@ const gameControllers: Pick<ClientToServerEvents, ClientGameEvents> = {
     const target = roomInfo.players[targetIndex];
     if (!target) return sendError(ws, 'RES_SUBMIT_COLOR', '目标玩家不存在');
 
-    const penalty = pending.cardType === 'bomb' ? 5 : 2;
-    drawCardsForPlayer(roomInfo, target, penalty);
-    roomInfo.pendingAction = null;
-    sendGameNotice(roomCode, `${actor.name} 指定 ${target.name}，获得 ${penalty} 张牌并跳过本轮`);
-    emitAfterPenalty(roomCode, roomInfo, targetIndex);
+    roomInfo.pendingAction = { kind: 'TARGET_COLOR', actorId: actor.id, targetId: target.id };
+    send(ws, {
+      message: `请为 ${target.name} 指定颜色`,
+      type: 'SELECT_COLOR',
+      data: { cardType: 'target' }
+    });
   },
   CHALLENGE_ADD4: (res, ws) => {
     const { challenge, roomCode } = res;
@@ -298,8 +377,8 @@ const gameControllers: Pick<ClientToServerEvents, ClientGameEvents> = {
       drawCardsForPlayer(roomInfo, actor, 4);
       sendGameNotice(roomCode, `${challenger.name} 质疑成功，${actor.name} 获得 4 张牌`);
     } else if (challenge) {
-      drawCardsForPlayer(roomInfo, challenger, 6);
-      sendGameNotice(roomCode, `${challenger.name} 质疑失败，获得 6 张牌`);
+      drawCardsForPlayer(roomInfo, challenger, 4);
+      sendGameNotice(roomCode, `${challenger.name} 质疑失败，获得 4 张牌`);
     } else {
       drawCardsForPlayer(roomInfo, challenger, 4);
       sendGameNotice(roomCode, `${challenger.name} 接受 +4，获得 4 张牌`);

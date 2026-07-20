@@ -2,6 +2,7 @@
 .vite-ssg-dist
 .vite-ssg-temp
 *.local
+.env.production
 dist
 dist-ssr
 node_modules
